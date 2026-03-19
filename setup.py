@@ -12,12 +12,12 @@ from shutil import rmtree
 from setuptools import find_packages, setup, Command
 
 # Package meta-data.
-NAME = 'bloch_schrodinger'
-DESCRIPTION = 'A solver for the 2D schrödinger equation.'
-URL = 'https://github.com/me/myproject'
+NAME = 'OptiLat'
+DESCRIPTION = 'An optical lattice builder.'
+URL = 'https://github.com/GuillotMartin/OptiLat'
 EMAIL = 'guillotmartin@yahoo.com'
 AUTHOR = 'Martin Guillot'
-REQUIRES_PYTHON = '>=3.14.0'
+REQUIRES_PYTHON = '>=3.12.0'
 VERSION = '0.1.0'
     
 # What packages are required for this module to be executed?
