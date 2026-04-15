@@ -1,0 +1,15 @@
+xarray
+scipy
+numpy
+ipywidgets
+IPython
+jupyter
+xarray_einstats
+anywidget
+pyparsing
+jupyter-bokeh
+matplotlib
+ipympl
+tqdm
+joblib
+cmcrameri

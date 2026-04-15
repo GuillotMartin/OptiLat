@@ -117,7 +117,7 @@ class Beam:
             )  # The k-vector is formatted as a DataArray with a size-3 "component" dimension
 
         else:
-            if isinstance(k, float):
+            if isinstance(k, Union[int, float]):
                 self.kl = k
                 self.k = k * direction
             else:
@@ -144,13 +144,15 @@ class Beam:
         dz = self.direction[{"component": 2}]
 
         # The TE vector is contained in the xy-plane
-        TE[{"component": 0}] = -dy
-        TE[{"component": 1}] = dx
+        TE[{"component": 0}] = xr.where((xr.ufuncs.equal(dx, 0) + xr.ufuncs.equal(dy, 0)), dz, -dy)
+        TE[{"component": 1}] = xr.where((xr.ufuncs.equal(dx, 0) + xr.ufuncs.equal(dy, 0)), 0, dx)
 
         # The second vector is determined by the cross-product of k and TE
-        TM[{"component": 0}] = -dx * dz
-        TM[{"component": 1}] = -dy * dz
+        TM[{"component": 0}] = xr.where((xr.ufuncs.equal(dx, 0) + xr.ufuncs.equal(dy, 0)), 0, -dx * dz)
+        TM[{"component": 1}] = xr.where((xr.ufuncs.equal(dx, 0) + xr.ufuncs.equal(dy, 0)), dz, -dy * dz)
         TM[{"component": 2}] = dy**2 + dx**2
+
+            
 
         # Complex amplitude A
         A = xr.zeros_like(self.direction, dtype=complex)
@@ -171,25 +173,38 @@ class OptiLat:
         self.Coherence: dict[list[Beam]] = {}  # the different coherent fields indexes
         self.maxIndex = 0
 
-    def add_beam(self, beam: Beam, index: int = 0):
-        """Add a beam object to the lattice. Each beam must be assigned a field index.
+    def add_beam(self, beam: Union[list[Beam], Beam], index: Union[int, list[int]] = 0):
+        """Add a beam or a list of beam object to the lattice. Each beam must be assigned a field index.
         All beams with the same field index are considered coherent for the final
         computation of complex amplitudes.
 
+
         Args:
-            beam (Beam)
+            beam (Union[list[Beam], Beam]): The beams to add
+            index (Union[int, list[int]], optional): Index of the beam, if a list of beams is passed, 
+            then a list of indexes must be passed too. Defaults to 0.
         """
-
-        if index is None:
-            index = self.maxIndex
-        if index >= self.maxIndex:
-            self.maxIndex = index + 1
-
-        self.beams.append([index, beam])
-        if index in self.Coherence.keys():
-            self.Coherence[index] = self.Coherence[index] + [beam]
+        if isinstance(beam, Beam):
+            beams = list(beam)
         else:
-            self.Coherence[index] = [beam]
+            beams = beam
+        if isinstance(index, int):
+            indexes = list(index)
+        else:
+            indexes = index
+
+            
+        for index, beam in zip(indexes, beams):
+            if index is None:
+                index = self.maxIndex
+            if index >= self.maxIndex:
+                self.maxIndex = index + 1
+
+            self.beams.append([index, beam])
+            if index in self.Coherence.keys():
+                self.Coherence[index] = self.Coherence[index] + [beam]
+            else:
+                self.Coherence[index] = [beam]
 
     def compute_fields(self, x: treal = 0, y: treal = 0, z: treal = 0) -> xr.DataArray:
         """The main function of the class, evaluate the complex-amplitude of each coherent

@@ -1,0 +1,69 @@
+Metadata-Version: 2.4
+Name: OptiLat
+Version: 0.1.0
+Summary: An optical lattice builder.
+Home-page: https://github.com/GuillotMartin/OptiLat
+Author: Martin Guillot
+Author-email: guillotmartin@yahoo.com
+License: MIT
+Classifier: License :: OSI Approved :: MIT License
+Classifier: Programming Language :: Python
+Classifier: Programming Language :: Python :: 3
+Classifier: Programming Language :: Python :: 3.14
+Classifier: Programming Language :: Python :: Implementation :: CPython
+Classifier: Programming Language :: Python :: Implementation :: PyPy
+Requires-Python: >=3.12.0
+Description-Content-Type: text/markdown
+License-File: LICENSE
+Requires-Dist: xarray
+Requires-Dist: scipy
+Requires-Dist: numpy
+Requires-Dist: ipywidgets
+Requires-Dist: IPython
+Requires-Dist: jupyter
+Requires-Dist: xarray_einstats
+Requires-Dist: anywidget
+Requires-Dist: pyparsing
+Requires-Dist: jupyter-bokeh
+Requires-Dist: matplotlib
+Requires-Dist: ipympl
+Requires-Dist: tqdm
+Requires-Dist: joblib
+Requires-Dist: cmcrameri
+Dynamic: author
+Dynamic: author-email
+Dynamic: classifier
+Dynamic: description
+Dynamic: description-content-type
+Dynamic: home-page
+Dynamic: license
+Dynamic: license-file
+Dynamic: requires-dist
+Dynamic: requires-python
+Dynamic: summary
+
+
+# Optical lattice builder 
+
+This package provides the tools to compute the time-independant EM field created by the interferences of multiple laser beams.
+
+## Installation
+
+First download the repository and extract it where you want. Then, run in your python environment 
+
+`bash`
+pip install path\\to\\package\\OptiLat
+
+or 
+
+`bash`
+pip install -e path\\to\\package\\OptiLat
+
+if you want to be able to modify it in place.
+
+## Getting started
+
+Once you have installed the package, open in a jupyter viewer the [Getting Started](docs/GettingStarted.ipynb) notebook.
+
+
+
