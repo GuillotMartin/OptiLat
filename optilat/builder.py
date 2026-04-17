@@ -1,6 +1,13 @@
 import numpy as np
 import xarray as xr
 from typing import Union
+from bloch_schrodinger.utils import create_sliders_from_dims
+import matplotlib.pyplot as plt
+from matplotlib.axes import Axes
+from matplotlib.figure import Figure
+from ipywidgets import FloatSlider, HBox, VBox, interactive_output
+from IPython.display import display
+from mpl_toolkits.mplot3d.art3d import Poly3DCollection
 
 type treal = Union[float, xr.DataArray]
 type tcomplex = Union[complex, xr.DataArray]
@@ -112,30 +119,31 @@ class Beam:
                 raise ValueError("Direction must be specified in wavelength mode.")
 
             self.kl = 2 * np.pi / wavelength  # k-vector modulus
-            self.k = (
+            self.k: xr.DataArray = (
                 self.kl * direction
             )  # The k-vector is formatted as a DataArray with a size-3 "component" dimension
 
         else:
             if isinstance(k, Union[int, float]):
                 self.kl = k
-                self.k = k * direction
+                self.k: xr.DataArray = k * direction
             else:
-                self.k = format_3dvec(k)
+                self.k: xr.DataArray = format_3dvec(k)
                 self.kl = (self.k**2).sum("component") ** 0.5
 
-        self.direction = self.k / self.kl
+        self.direction: xr.DataArray = self.k / self.kl
+        self.TE, self.TM = self.compute_3d_Polar()
+        self.A = self.compute_Camplitude()
 
     def __repr__(self):
         return f"A beam with k-vector: {self.kl}, \ndirection {self.direction} \nand polarization {self.polar}"
 
-    def compute_Camplitude(self) -> xr.DataArray:
-        """Returns the complex amplitude (Ax, Ay, Az) of the beam. The full EM-field produced can then be written as Ei = Re[Ai exp(1j * (k.r - w.t))]
+    def compute_3d_Polar(self) -> tuple[xr.DataArray, xr.DataArray]:
+        """Compute the TE and TM vector's component in the cartesian basis
 
         Returns:
-            xr.DataArray: Complex amplitude (Ax, Ay, Az)
+            tuple[xr.DataArray, xr.DataArray]: _description_
         """
-
         TE = xr.zeros_like(self.direction)  # First vector orthogonal to k
         TM = xr.zeros_like(self.direction)  # Second vector orthogonal to k
 
@@ -144,20 +152,33 @@ class Beam:
         dz = self.direction[{"component": 2}]
 
         # The TE vector is contained in the xy-plane
-        TE[{"component": 0}] = xr.where((xr.ufuncs.equal(dx, 0) + xr.ufuncs.equal(dy, 0)), dz, -dy)
-        TE[{"component": 1}] = xr.where((xr.ufuncs.equal(dx, 0) + xr.ufuncs.equal(dy, 0)), 0, dx)
+        TE[{"component": 0}] = xr.where(
+            (xr.ufuncs.equal(dx, 0) * xr.ufuncs.equal(dy, 0)), dz, -dy
+        )
+        TE[{"component": 1}] = xr.where(
+            (xr.ufuncs.equal(dx, 0) * xr.ufuncs.equal(dy, 0)), 0, dx
+        )
 
         # The second vector is determined by the cross-product of k and TE
-        TM[{"component": 0}] = xr.where((xr.ufuncs.equal(dx, 0) + xr.ufuncs.equal(dy, 0)), 0, -dx * dz)
-        TM[{"component": 1}] = xr.where((xr.ufuncs.equal(dx, 0) + xr.ufuncs.equal(dy, 0)), dz, -dy * dz)
+        TM[{"component": 0}] = xr.where(
+            (xr.ufuncs.equal(dx, 0) * xr.ufuncs.equal(dy, 0)), 0, -dx * dz
+        )
+        TM[{"component": 1}] = xr.where(
+            (xr.ufuncs.equal(dx, 0) * xr.ufuncs.equal(dy, 0)), dz, -dy * dz
+        )
         TM[{"component": 2}] = dy**2 + dx**2
+        return TE, TM
 
-            
+    def compute_Camplitude(self) -> xr.DataArray:
+        """Returns the complex amplitude (Ax, Ay, Az) of the beam. The full EM-field produced can then be written as Ei = Re[Ai exp(1j * (k.r - w.t))]
 
-        # Complex amplitude A
+        Returns:
+            xr.DataArray: Complex amplitude (Ax, Ay, Az)
+        """
+
         A = xr.zeros_like(self.direction, dtype=complex)
-        A = A + TE * self.polar[{"Jones": 0}] * self.amplitude
-        A = A + TM * self.polar[{"Jones": 1}] * self.amplitude
+        A = A + self.TE * self.polar[{"Jones": 0}] * self.amplitude
+        A = A + self.TM * self.polar[{"Jones": 1}] * self.amplitude
 
         return A
 
@@ -181,19 +202,18 @@ class OptiLat:
 
         Args:
             beam (Union[list[Beam], Beam]): The beams to add
-            index (Union[int, list[int]], optional): Index of the beam, if a list of beams is passed, 
+            index (Union[int, list[int]], optional): Index of the beam, if a list of beams is passed,
             then a list of indexes must be passed too. Defaults to 0.
         """
         if isinstance(beam, Beam):
-            beams = list(beam)
+            beams = [beam]
         else:
             beams = beam
         if isinstance(index, int):
-            indexes = list(index)
+            indexes = [index]
         else:
             indexes = index
 
-            
         for index, beam in zip(indexes, beams):
             if index is None:
                 index = self.maxIndex
@@ -234,10 +254,196 @@ class OptiLat:
                 + beam.k[{"component": 2}] * z
             )
 
-            Camp = beam.compute_Camplitude()
-
-            Fields = Fields + (Camp * xr.ufuncs.exp(1j * kdr)).assign_coords(
+            Fields = Fields + (beam.A * xr.ufuncs.exp(1j * kdr)).assign_coords(
                 {"field": co}
             )
 
         return Fields
+
+    def plot(
+        self,
+        box: Union[float, list[float, float, float], xr.DataArray] = 10,
+        laser_style: Union[dict, list[dict]] = None,
+        slider_start: str = "left",
+    ) -> tuple[Figure, Axes]:
+        """An interactive plotting function for an optical lattice. Represents each laser beam by an arrow, with its polarization ellipse. 
+        The lenth of each laser arrow is equal to the wavelength of the corresponding laser beam.
+
+        Args:
+            box (Union[float, list[float,float,float], xr.DataArray], optional): The size of the box's sides in arbitrary units.
+            Can be given as a single scalar for a cubic box, a list of 3 scalars for a custom rectangular box,
+            or a DataArray with a size-3 component dimension for a dynamically sized box. Defaults to 10.
+            laser_style (Union[dict, list[dict]], optional): The styles of the laser arrow and polarization ellipse. 
+            If None is given, a simple style will be used.
+            If a list of dict is given, then the style of each laser beam will be looped over this list. 
+            Each style must contain a "direction" key linked to a dictionnary that will be passed as kwargs 
+            for matplotlib's quiver function and a "polar"key that will be passed likewise to the 
+            plot function for the polarization ellipse. Defaults to None.
+            slider_start (str, optional): The default starting position of the sliders, can be "left" or "center". Defaults to "left".
+
+        Returns:
+            tuple[Figure,Axes]
+        """
+        if isinstance(box, Union[int, float]):
+            box = xr.DataArray([box, box, box], coords={"component": [0, 1, 2]})
+        elif isinstance(box, list):
+            box = xr.DataArray(box, coords={"component": [0, 1, 2]})
+
+        if laser_style is None:
+            laser_styles = [
+                {
+                    "direction": {"colors": "k", "linewidths": 2},
+                    "polar": {
+                        "color": "r",
+                        "linewidth": 2,
+                    },
+                }
+            ]
+        elif isinstance(laser_style, dict):
+            laser_styles = [laser_style]
+        else:
+            laser_styles = laser_style
+        l_s = len(laser_styles)
+
+        # for ind, beam in self.beams:
+        #     km = abs(beam.k).max([dim for dim in beam.k.dims if dim != "component"])
+        #     print(km)
+
+        # Creating the sliders objects
+        slider_dims = []
+        dict_coords = {}
+        for ind, beam in self.beams:
+            k_dims = [
+                dim for dim in beam.k.dims if dim not in slider_dims + ["component"]
+            ]
+            p_dims = [
+                dim
+                for dim in beam.polar.dims
+                if dim not in slider_dims + k_dims + ["Jones", "Component"]
+            ]
+            dict_coords.update({dim: beam.k.coords[dim] for dim in k_dims})
+            dict_coords.update({dim: beam.polar.coords[dim] for dim in p_dims})
+            slider_dims += k_dims + p_dims
+        sliders = create_sliders_from_dims(
+            {dim: dict_coords[dim] for dim in slider_dims}, start=slider_start
+        )
+
+        # Initial parameter selections
+        initial_sel = {dim: sliders[dim].value for dim in sliders}
+
+        # Functions
+
+        def set_box(ax, box, sel):
+            subsel = {dim: val for dim, val in sel.items() if dim in box.dims}
+            size_sel = box.sel(subsel, method="nearest")
+            ax.set_xlim(-size_sel[0] / 2, size_sel[0] / 2)
+            ax.set_ylim(-size_sel[1] / 2, size_sel[1] / 2)
+            ax.set_zlim(-size_sel[2] / 2, size_sel[2] / 2)
+
+        def place_beam(
+            ax: Axes, beam: Beam, box: xr.DataArray, sel: dict, laser_style: dict
+        ):
+
+            k_subsel = {dim: val for dim, val in sel.items() if dim in beam.k.dims}
+            p_subsel = {dim: val for dim, val in sel.items() if dim in beam.polar.dims}
+            s_subsel = {dim: val for dim, val in sel.items() if dim in box.dims}
+
+            te_subsel = {dim: val for dim, val in sel.items() if dim in beam.TE.dims}
+            tm_subsel = {dim: val for dim, val in sel.items() if dim in beam.TM.dims}
+
+            k_sel = beam.k.sel(k_subsel, method="nearest")
+            polar_sel = beam.polar.sel(p_subsel, method="nearest")
+            size_sel = box.sel(s_subsel, method="nearest")
+            TE_sel = beam.TE.sel(te_subsel, method="nearest")
+            TM_sel = beam.TM.sel(tm_subsel, method="nearest")
+
+            k_length = (abs(k_sel) ** 2).sum() ** 0.5
+            k_dir = k_sel / k_length
+
+            position = -k_dir * size_sel / 2
+            dir = ax.quiver(
+                position[0],
+                position[1],
+                position[2],  # base position
+                k_dir[0],
+                k_dir[1],
+                k_dir[2],  # direction
+                length=2 * np.pi / float(k_length),
+                **laser_style.get("direction", {"colors": "b"}),
+            )
+
+            t = np.linspace(0, 1, 100)
+            comps = []
+            for i in range(3):
+                comps += [
+                    TE_sel.sel(component=i).item()
+                    * np.real(np.exp(1j * 2 * np.pi * t) * polar_sel[0].item())
+                    * np.pi
+                    / float(k_length)
+                    + TM_sel.sel(component=i).item()
+                    * np.real(np.exp(1j * 2 * np.pi * t) * polar_sel[1].item())
+                    * np.pi
+                    / float(k_length)
+                    + position[i].item()
+                ]
+            pol = ax.plot(*comps, **laser_style["polar"])
+
+            return dir, pol
+
+        # Initial data selection
+
+        fig = plt.figure()
+        ax = fig.add_subplot(projection="3d")
+
+        set_box(ax, box, initial_sel)
+        ax.set_aspect("equal")
+        ax.set_xlabel("x")
+        ax.set_ylabel("y")
+        ax.set_zlabel("z")
+        
+        list_dir, list_pol = [], []
+
+        for i, (ind, beam) in enumerate(self.beams):
+            dir, pol = place_beam(ax, beam, box, initial_sel, laser_styles[i%l_s])
+            list_dir += [dir]
+            list_pol += [pol]
+
+        def update(**kwargs):
+            sel = {dim: kwargs[dim] for dim in sliders}
+            for line in ax.lines:
+                line.remove()
+            for i, (ind, beam) in enumerate(self.beams):
+                list_dir[i].remove()
+                list_dir[i], list_pol[i] = place_beam(ax, beam, box, sel, laser_styles[i%l_s])
+
+            fig.canvas.draw_idle()
+
+        out = interactive_output(update, sliders)
+        # Display everything
+        display(VBox(list(sliders.values()) + [out]))
+        return fig, ax
+
+
+if __name__ == "__main__":
+    from bloch_schrodinger.potential import create_parameter
+
+    lamb = 0.83  # Laser wavelength
+    laser_angles = [np.pi / 2 + np.pi * 2 / 3 * i for i in range(3)]  # 120deg lasers
+
+    theta = create_parameter("theta", np.linspace(0, np.pi / 2, 50))
+    phi = create_parameter("phi", np.linspace(0, np.pi, 50))
+    dirtst = create_parameter("dirtest", np.linspace(0, 1, 20))
+
+    beams = [
+        Beam(
+            wavelength=lamb,
+            direction=[np.cos(ang), np.sin(ang) + dirtst, 0],
+            polar=[np.cos(theta), np.sin(theta) * np.exp(1j * phi)],
+        )
+        for ang in laser_angles
+    ]
+
+    lattice = OptiLat()
+    lattice.add_beam(beams, [0] * 3)
+    lattice.plot(size=[7, 7, 2])
+    plt.show()
