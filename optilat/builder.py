@@ -253,10 +253,8 @@ class OptiLat:
                 + beam.k[{"component": 1}] * y
                 + beam.k[{"component": 2}] * z
             )
-
-            Fields = Fields + (beam.A * xr.ufuncs.exp(1j * kdr)).assign_coords(
-                {"field": co}
-            )
+            ToAdd = (beam.A * xr.ufuncs.exp(1j * kdr)).expand_dims({"field": coherent_layers})
+            Fields = Fields + xr.where(ToAdd.field == co, ToAdd, 0)
 
         return Fields
 
@@ -304,10 +302,6 @@ class OptiLat:
         else:
             laser_styles = laser_style
         l_s = len(laser_styles)
-
-        # for ind, beam in self.beams:
-        #     km = abs(beam.k).max([dim for dim in beam.k.dims if dim != "component"])
-        #     print(km)
 
         # Creating the sliders objects
         slider_dims = []
