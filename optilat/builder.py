@@ -1,11 +1,14 @@
 import numpy as np
 import xarray as xr
-from typing import Union
+from typing import Union, TYPE_CHECKING
 import matplotlib.pyplot as plt
 from matplotlib.axes import Axes
 from matplotlib.figure import Figure
 from ipywidgets import VBox, interactive_output
 from IPython.display import display
+
+if TYPE_CHECKING:
+    from optilat.profiles import Profile
 
 type treal = Union[float, xr.DataArray]
 type tcomplex = Union[complex, xr.DataArray]
@@ -85,6 +88,7 @@ class Beam:
         k: Union[treal, vec3d] = None,
         direction: vec3d = None,
         polar: tpolar = None,
+        profile: "Profile" = None,
     ):
         """The Beam class contains simple functions to handle laser-generated plane waves ofr optical lattice construction.
         It supports xarray broadcast rules on every input. A beam's k-vector can be given as a wavelength + direction,
@@ -103,9 +107,13 @@ class Beam:
             The first component is always in the xy plane. It is used as given, without renormalization, so that
             the norm of the resulting complex amplitude is |amplitude| times the norm of the Jones vector.
             Defaults to [1,0].
+            profile (Profile, optional): The lateral profile of the beam, e.g. a GaussianProfile. The
+            field of the beam is then A u(r) exp(i k.r), with u the profile's envelope. Defaults to
+            None, an infinite plane wave.
         """
 
         self.amplitude = amplitude  # Amplitude of the beam
+        self.profile = profile  # Lateral profile of the beam, None for a plane wave
         self.polar = format_polar(
             [1, 0] if polar is None else polar
         )  # The polarization is formatted as a complex DataArray with a size-2 "Jones" dimension
@@ -151,7 +159,11 @@ class Beam:
         self.A = self.compute_Camplitude()
 
     def __repr__(self):
-        return f"A beam with k-vector: {self.kl}, \ndirection {self.direction} \nand polarization {self.polar}"
+        profile = "plane wave" if self.profile is None else self.profile
+        return (
+            f"A beam with k-vector: {self.kl}, \ndirection {self.direction} "
+            f"\npolarization {self.polar} \nand profile {profile}"
+        )
 
     def compute_3d_Polar(self) -> tuple[xr.DataArray, xr.DataArray]:
         """Compute the TE and TM unit vectors' components in the cartesian basis.
@@ -201,6 +213,48 @@ class Beam:
         A = A + self.TM * self.polar[{"Jones": 1}] * self.amplitude
 
         return A
+
+    def beam_frame(self, x: treal = 0, y: treal = 0, z: treal = 0) -> tuple:
+        """The coordinates of the points (x, y, z) in the beam frame, centred on the profile's focus.
+
+        Args:
+            x (treal, optional): The x-coordinate. Defaults to 0.
+            y (treal, optional): The y-coordinate. Defaults to 0.
+            z (treal, optional): The z-coordinate. Defaults to 0.
+
+        Returns:
+            tuple: (s, t1, t2), the coordinates along the direction of propagation, the TE and the
+            TM unit vectors. The focus is the origin, or the origin of space for a plane wave.
+        """
+        focus = [0, 0, 0] if self.profile is None else self.profile.focus
+        rel = [r - _comp(focus, i) for i, r in enumerate((x, y, z))]
+
+        def project(vec):
+            return sum(_comp(vec, i) * rel[i] for i in range(3))
+
+        return project(self.direction), project(self.TE), project(self.TM)
+
+    def envelope(self, x: treal = 0, y: treal = 0, z: treal = 0):
+        """The complex envelope u(r) of the beam, whose field is A u(r) exp(i k.r).
+
+        Args:
+            x (treal, optional): The x-coordinate. Defaults to 0.
+            y (treal, optional): The y-coordinate. Defaults to 0.
+            z (treal, optional): The z-coordinate. Defaults to 0.
+
+        Returns:
+            The envelope, or 1 for a plane wave.
+        """
+        if self.profile is None:
+            return 1
+        return self.profile.envelope(*self.beam_frame(x, y, z), self.kl)
+
+
+def _comp(vec, i: int):
+    """The i-th cartesian component of a vector, without a leftover "component" coordinate."""
+    if isinstance(vec, xr.DataArray):
+        return vec.isel(component=i, drop=True)
+    return vec[i]
 
 
 class OptiLat:
@@ -283,7 +337,7 @@ class OptiLat:
                 + beam.k[{"component": 1}] * y
                 + beam.k[{"component": 2}] * z
             )
-            ToAdd = beam.A * xr.ufuncs.exp(1j * kdr)
+            ToAdd = beam.A * beam.envelope(x, y, z) * xr.ufuncs.exp(1j * kdr)
             layers[co] = ToAdd if co not in layers else layers[co] + ToAdd
 
         Fields = xr.concat(
@@ -371,6 +425,9 @@ class OptiLat:
             register_dims(beam.k, ["component"])
             register_dims(beam.polar, ["Jones"])
             register_dims(beam.amplitude, [])
+            if beam.profile is not None:
+                for param in beam.profile.parameters():
+                    register_dims(param, ["component"])
 
         sliders = create_sliders_from_dims(
             {dim: dict_coords[dim] for dim in slider_dims}, start=slider_start
