@@ -48,23 +48,26 @@ circular polarization on its own.
 
 ## Time-dependent lattices
 
-`optilat.dynamics` builds *time-dependent* potentials out of a lattice, for the `PotentialT` and
-`AnalyticPotential` classes of the `BECs` package. Give each beam a complex time factor
+`optilat.dynamics` and `optilat.adapters` build *time-dependent* potentials out of a lattice, for the
+`PotentialT` and `AnalyticPotential` classes of the `BECs` package. Give each beam a complex time factor
 `c_j(t) = s_j(t) exp(i phi_j(t))` with a `BeamDrive` -- `ramp`, `shake`, `move`, `modulate` and
 `pulse` cover the usual experiments, and any plain callable covers the rest -- and the squared field
 splits exactly into static pairwise gratings times pure functions of time. Since this is an
 algebraic identity rather than a slow-envelope approximation, lattice loading, modulation
 spectroscopy, Floquet shaking and moving lattices are all described without approximation. Any drive
-argument passed as a `create_parameter` array becomes a parameter dimension the solvers sweep.
+argument passed as a `create_parameter` array becomes a parameter dimension the solvers sweep, and so
+does any input of the beams (amplitude, wavelength, direction, polarization), of their profiles, or a
+polarizability, on every route. `Beam.sel` and `OptiLat.sel` reduce a lattice to a single point of its
+parameter space, and `param_coords` lists the dimensions it carries.
 
 Three routes are available, all describing the same potential to round-off. Measured per time step
 for three beams with the polarizability tensor's vector part switched on (15 gratings):
 
 | route | 128x128 | 256x256 | when to use it |
 |---|---|---|---|
-| `add_to_potentialT(..., mode="shapes")` | 4.4 ms | 5.2 ms | the default: parameter dimensions carried by the beams stay sweepable, and the terms compose with the rest of the potential |
-| `add_to_potentialT(..., mode="stacked")` | 0.8 ms | 1.1 ms | long runs: one term instead of fifteen, but the beams must carry no parameter dimension of their own |
-| `add_to_analytic(...)` | 0.9 ms | 3.8 ms | the rescaling solver, whose grid moves at every step, and grids too large to hold the gratings |
+| `add_to_potentialT(..., mode="shapes")` | 4.4 ms | 5.3 ms | the default: one shape and one time function per grating, which compose with the rest of the potential and can be inspected one by one |
+| `add_to_potentialT(..., mode="stacked")` | 0.8 ms | 1.0 ms | long runs: the gratings are summed by a single function, one tensor contraction per step |
+| `add_to_analytic(...)` | 0.9 ms | 3.9 ms | `AnalyticPotential` and the rescaling solver, whose grid moves at every step, and grids too large to hold the gratings. Evaluated in the array module of the coordinates it is given, numpy or cupy |
 
 The gratings cost `n_gratings x grid`, so on a large 3D grid the analytic route is the one to reach
 for. See the [Time-dependent lattices](docs/TimeDependentLattices.ipynb) notebook.

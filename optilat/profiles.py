@@ -9,7 +9,9 @@ paraxial approximation. The envelope is written in the beam's own frame:
     t2 = (r - focus) . TM          the transverse coordinate along the TM unit vector
 
 The envelopes only use numpy operations, so the same code evaluates them on xarray DataArrays (in
-OptiLat.compute_fields and dynamics.expand) and on plain numpy arrays (in dynamics.add_to_analytic).
+OptiLat.compute_fields and dynamics.expand) and on plain numpy or cupy arrays (in the adapters
+module). Every DataArray attribute of a profile is one of its inputs, which is what lets the base
+class find and select the parameter dimensions of any subclass without it having to declare them.
 """
 
 import numpy as np
@@ -17,6 +19,7 @@ import xarray as xr
 from typing import Union
 
 from optilat.builder import format_3dvec, treal, vec3d
+from optilat.parameters import collect_dims, select_attributes
 
 
 class Profile:
@@ -48,13 +51,23 @@ class Profile:
         """
         raise NotImplementedError
 
-    def parameters(self) -> list:
-        """Every input of the profile, used to detect parameter dimensions.
+    @property
+    def param_coords(self) -> dict[str, xr.DataArray]:
+        """The parameter dimensions carried by the profile's inputs, with their coordinates."""
+        return collect_dims(*vars(self).values())
+
+    def sel(self, selection: dict, method: str = "nearest") -> "Profile":
+        """The profile at a single point of its parameter space.
+
+        Args:
+            selection (dict): The selected label of each parameter dimension. The dimensions the
+            profile does not carry are ignored.
+            method (str, optional): The xarray selection method. Defaults to "nearest".
 
         Returns:
-            list: The profile's inputs, scalars or DataArrays.
+            Profile: A copy of the profile, reduced to the selected point.
         """
-        return [self.focus]
+        return select_attributes(self, selection, method)
 
 
 class GaussianProfile(Profile):
@@ -105,10 +118,6 @@ class GaussianProfile(Profile):
             f"GaussianProfile(waist=({self.waist_TE}, {self.waist_TM}), "
             f"diffraction={self.diffraction}, power={self.power})"
         )
-
-    def parameters(self) -> list:
-        params = [self.waist_TE, self.waist_TM, self.focus]
-        return params if self.power is None else params + [self.power]
 
     def rayleigh_range(self, kl: treal) -> tuple[treal, treal]:
         """The Rayleigh ranges zR = kl w^2 / 2 along the TE and TM axes.

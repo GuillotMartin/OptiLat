@@ -7,6 +7,8 @@ from matplotlib.figure import Figure
 from ipywidgets import VBox, interactive_output
 from IPython.display import display
 
+from optilat.parameters import collect_dims, merge_dims, select, select_attributes
+
 if TYPE_CHECKING:
     from optilat.profiles import Profile
 
@@ -249,6 +251,37 @@ class Beam:
             return 1
         return self.profile.envelope(*self.beam_frame(x, y, z), self.kl)
 
+    @property
+    def param_coords(self) -> dict[str, xr.DataArray]:
+        """The parameter dimensions the beam carries, profile included, with their coordinates.
+
+        Raises:
+            ValueError: If a parameter dimension has no coordinate values.
+        """
+        own = collect_dims(*vars(self).values())
+        if self.profile is None:
+            return own
+        return merge_dims(own, self.profile.param_coords)
+
+    def sel(self, selection: dict, method: str = "nearest") -> "Beam":
+        """The beam at a single point of its parameter space.
+
+        Every attribute is a pointwise function of the inputs, so selecting them all is the same as
+        building the beam from the selected inputs.
+
+        Args:
+            selection (dict): The selected label of each parameter dimension. The dimensions the
+            beam does not carry are ignored.
+            method (str, optional): The xarray selection method. Defaults to "nearest".
+
+        Returns:
+            Beam: A copy of the beam, reduced to the selected point.
+        """
+        new = select_attributes(self, selection, method)
+        if self.profile is not None:
+            new.profile = self.profile.sel(selection, method)
+        return new
+
 
 def _comp(vec, i: int):
     """The i-th cartesian component of a vector, without a leftover "component" coordinate."""
@@ -306,6 +339,32 @@ class OptiLat:
                 self.Coherence[index] = self.Coherence[index] + [beam]
             else:
                 self.Coherence[index] = [beam]
+
+    @property
+    def param_coords(self) -> dict[str, xr.DataArray]:
+        """The parameter dimensions carried by the beams of the lattice, with their coordinates.
+
+        Raises:
+            ValueError: If a parameter dimension has no coordinate values, or if two beams give the
+            same dimension different coordinates.
+        """
+        return merge_dims(*(beam.param_coords for _, beam in self.beams))
+
+    def sel(self, selection: dict, method: str = "nearest") -> "OptiLat":
+        """The lattice at a single point of its parameter space.
+
+        Args:
+            selection (dict): The selected label of each parameter dimension. The dimensions the
+            lattice does not carry are ignored, so the selection of a whole solver run can be passed.
+            method (str, optional): The xarray selection method. Defaults to "nearest".
+
+        Returns:
+            OptiLat: A new lattice, with the same field indexes and every beam reduced.
+        """
+        new = OptiLat()
+        for index, beam in self.beams:
+            new.add_beam(beam.sel(selection, method), index)
+        return new
 
     def compute_fields(self, x: treal = 0, y: treal = 0, z: treal = 0) -> xr.DataArray:
         """The main function of the class, evaluate the complex-amplitude of each coherent
@@ -401,47 +460,14 @@ class OptiLat:
         l_s = len(laser_styles)
 
         # Creating the sliders objects, one per parameter dimension of the box and of the beams
-        slider_dims = []
-        dict_coords = {}
-
-        def register_dims(obj, skip):
-            """Register every parameter dimension of obj that has no slider yet."""
-            if not isinstance(obj, xr.DataArray):
-                return
-            for dim in obj.dims:
-                if dim in skip or dim in slider_dims:
-                    continue
-                if dim not in obj.coords:
-                    raise ValueError(
-                        f"The '{dim}' dimension has no coordinate values, so no slider can be "
-                        "built for it. Give it coordinates, e.g. with "
-                        "bloch_schrodinger.potential.create_parameter."
-                    )
-                dict_coords[dim] = obj.coords[dim]
-                slider_dims.append(dim)
-
-        register_dims(box, ["component"])
-        for ind, beam in self.beams:
-            register_dims(beam.k, ["component"])
-            register_dims(beam.polar, ["Jones"])
-            register_dims(beam.amplitude, [])
-            if beam.profile is not None:
-                for param in beam.profile.parameters():
-                    register_dims(param, ["component"])
-
         sliders = create_sliders_from_dims(
-            {dim: dict_coords[dim] for dim in slider_dims}, start=slider_start
+            merge_dims(collect_dims(box), self.param_coords), start=slider_start
         )
 
         # Initial parameter selections
         initial_sel = {dim: sliders[dim].value for dim in sliders}
 
         # Functions
-
-        def select(obj: xr.DataArray, sel: dict) -> xr.DataArray:
-            """Reduce obj to the currently selected slider values."""
-            subsel = {dim: val for dim, val in sel.items() if dim in obj.dims}
-            return obj.sel(subsel, method="nearest")
 
         def components(obj: xr.DataArray) -> list[float]:
             """The 3 cartesian components of obj as plain floats."""
@@ -457,13 +483,10 @@ class OptiLat:
             ax: Axes, beam: Beam, box: xr.DataArray, sel: dict, laser_style: dict
         ):
 
-            k_sel = select(beam.k, sel)
-            polar_sel = select(beam.polar, sel)
-            TE_sel = select(beam.TE, sel)
-            TM_sel = select(beam.TM, sel)
+            beam = beam.sel(sel)
 
-            k_length = float((abs(k_sel) ** 2).sum() ** 0.5)
-            k_dir = components(k_sel / k_length)
+            k_length = float((abs(beam.k) ** 2).sum() ** 0.5)
+            k_dir = components(beam.k / k_length)
             size = components(select(box, sel))
 
             position = [-d * s / 2 for d, s in zip(k_dir, size)]
@@ -476,11 +499,11 @@ class OptiLat:
 
             # The polarization ellipse, drawn over one optical period at the arrow's base
             t = np.linspace(0, 1, 100)
-            TE_osc = np.real(np.exp(1j * 2 * np.pi * t) * complex(polar_sel.isel(Jones=0)))
-            TM_osc = np.real(np.exp(1j * 2 * np.pi * t) * complex(polar_sel.isel(Jones=1)))
+            TE_osc = np.real(np.exp(1j * 2 * np.pi * t) * complex(beam.polar.isel(Jones=0)))
+            TM_osc = np.real(np.exp(1j * 2 * np.pi * t) * complex(beam.polar.isel(Jones=1)))
             comps = [
                 (te * TE_osc + tm * TM_osc) * np.pi / k_length + p
-                for te, tm, p in zip(components(TE_sel), components(TM_sel), position)
+                for te, tm, p in zip(components(beam.TE), components(beam.TM), position)
             ]
             pol = ax.plot(*comps, **laser_style.get("polar", {"color": "r", "linewidth": 2}))
 

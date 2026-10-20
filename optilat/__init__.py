@@ -4,10 +4,9 @@ from optilat.dynamics import (
     Expansion,
     Grating,
     LatticeDrive,
-    add_to_analytic,
-    add_to_potentialT,
     expand,
 )
+from optilat.adapters import LatticeFunction, add_to_analytic, add_to_potentialT
 from optilat.profiles import GaussianProfile, Profile
 from optilat.potentials import (
     cartesian_axes,
@@ -36,6 +35,7 @@ __all__ = [
     "Grating",
     "Expansion",
     "expand",
+    "LatticeFunction",
     "add_to_potentialT",
     "add_to_analytic",
 ]

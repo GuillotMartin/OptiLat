@@ -25,6 +25,21 @@ def is_zero(value) -> bool:
     return not isinstance(value, xr.DataArray) and value == 0
 
 
+def axes_from_coords(coords, names=("x", "y", "z")) -> dict:
+    """Name a list of cartesian coordinates, ready to be passed to compute_fields.
+
+    Args:
+        coords: One to three coordinates, in the order of 'names'.
+        names (tuple[str], optional): The names of the axes. Defaults to ("x", "y", "z").
+
+    Returns:
+        dict: The "x", "y" and "z" coordinates. The axes not given are set to 0.
+    """
+    axes = {name: 0 for name in ("x", "y", "z")}
+    axes.update(zip(names, coords))
+    return axes
+
+
 def cartesian_axes(pot) -> dict[str, xr.DataArray]:
     """The cartesian coordinates of a Potential-like object, ready to be passed to compute_fields.
 
@@ -36,9 +51,7 @@ def cartesian_axes(pot) -> dict[str, xr.DataArray]:
         dict[str, xr.DataArray]: The "x", "y" and "z" coordinates of the potential's grid. The axes
         the potential does not have are set to 0.
     """
-    axes = {name: 0 for name in ("x", "y", "z")}
-    axes.update({pot.coord_names[i]: pot.coords[i] for i in range(pot.n_dims)})
-    return axes
+    return axes_from_coords(pot.coords[: pot.n_dims], pot.coord_names)
 
 
 def field_on(lattice, pot) -> xr.DataArray:
