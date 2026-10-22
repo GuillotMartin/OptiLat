@@ -67,7 +67,7 @@ for three beams with the polarizability tensor's vector part switched on (15 gra
 |---|---|---|---|
 | `add_to_potentialT(..., mode="shapes")` | 4.4 ms | 5.3 ms | the default: one shape and one time function per grating, which compose with the rest of the potential and can be inspected one by one |
 | `add_to_potentialT(..., mode="stacked")` | 0.8 ms | 1.0 ms | long runs: the gratings are summed by a single function, one tensor contraction per step |
-| `add_to_analytic(...)` | 0.9 ms | 3.9 ms | `AnalyticPotential` and the rescaling solver, whose grid moves at every step, and grids too large to hold the gratings. Evaluated in the array module of the coordinates it is given, numpy or cupy |
+| `add_to_analytic(...)` | 0.9 ms | 3.9 ms | `AnalyticPotential`, for solvers whose grid moves at every step, and grids too large to hold the gratings. Evaluated in the array module of the coordinates it is given, numpy or cupy |
 
 The gratings cost `n_gratings x grid`, so on a large 3D grid the analytic route is the one to reach
 for. See the [Time-dependent lattices](docs/TimeDependentLattices.ipynb) notebook.

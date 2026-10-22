@@ -9,6 +9,7 @@ import xarray as xr
 
 potentialT = pytest.importorskip("BECs.potentialT")
 create_parameter = pytest.importorskip("bloch_schrodinger.potential").create_parameter
+frames = pytest.importorskip("bloch_schrodinger.frames")
 
 from optilat import (
     Beam,
@@ -87,6 +88,17 @@ def test_every_dimension_is_registered(routes):
         assert set(pot.param_coords) == set(SWEEP)
 
 
+def test_the_fast_routes_register_functions_that_select_themselves(routes):
+    """The lattice's own dims reach the function through 'sel', not as fake keyword parameters."""
+    analytic, _, stacked = routes
+    for pot, name in ((analytic, "lat"), (stacked, "lat_sum")):
+        entry = pot.funcs[name]
+        assert potentialT.selects_itself(entry["func"])
+        assert set(entry["selects"]) == {"theta", "waist", "alpha"}
+        # only the drive's own parameter is handed over as a keyword
+        assert set(entry["parameters"]) | set(entry["dims"]) == {"nu"}
+
+
 def test_solver_path_agrees_across_routes(routes):
     analytic, shapes, stacked = routes
     for sel in selections():
@@ -133,15 +145,15 @@ def test_static_lattice_matches_compute_fields():
 
 
 def test_broadcast_coordinates_match_the_dense_grid():
-    """The rescaling solver hands over 1-D coordinates shaped to broadcast against each other."""
+    """A solver may hand over 1-D coordinates shaped to broadcast against each other."""
     lattice = honeycomb()
     function = LatticeFunction(lattice, shaken(lattice), **STARK)
     analytic = AnalyticPotential(BOX, RES)
-    params = {"nu": 2.5, "_dim_theta": 0.6, "_dim_waist": 3.0, "_dim_alpha": 2.0}
+    at = function.sel({"theta": 0.6, "waist": 3.0, "alpha": 2.0})
 
-    dense = function(0.4, *(np.asarray(c) for c in analytic.coords), **params)
-    rank1 = function(0.4, *analytic.coords_1d(), **params)
-    labelled = function(0.4, *analytic.coords, **params)
+    dense = at(0.4, *(np.asarray(c) for c in analytic.coords), nu=2.5)
+    rank1 = at(0.4, *analytic.coords_1d(), nu=2.5)
+    labelled = at(0.4, *analytic.coords, nu=2.5)
 
     np.testing.assert_allclose(rank1, dense, atol=1e-12)
     assert isinstance(labelled, xr.DataArray) and labelled.dims == ("a1", "a2")
@@ -155,7 +167,7 @@ def test_plain_lattice_without_parameters():
 
     analytic = AnalyticPotential(BOX, RES)
     function = add_to_analytic(analytic, lattice, drive, alpha_s=1.0)
-    assert function.dims == {} and analytic.param_coords == {}
+    assert function.param_coords == {} and analytic.param_coords == {}
 
     shapes = PotentialT(BOX, RES, v0=0)
     add_to_potentialT(shapes, lattice, drive, alpha_s=1.0)
@@ -194,17 +206,19 @@ def test_term_false_only_registers_the_function():
 
 def test_missing_dimension_raises():
     function = LatticeFunction(honeycomb())
-    x = np.linspace(0, 1, 4)
     with pytest.raises(ValueError, match="theta"):
-        function(0.0, x, x, _dim_waist=1.5)
+        function.sel({"waist": 1.5})
 
 
-def test_reserved_prefix_raises():
-    lattice = honeycomb()
-    drive = LatticeDrive(lattice)
-    drive[0] = BeamDrive.move(detuning=create_parameter("_dim_bad", np.array([0.0, 1.0])))
-    with pytest.raises(ValueError, match="reserved"):
-        LatticeFunction(lattice, drive)
+def test_plain_coordinates_need_a_reduced_function():
+    """Unreduced, the result keeps the lattice's dims, which plain arrays cannot be kept apart from."""
+    function = LatticeFunction(honeycomb())
+    x = np.linspace(0, 1, 4)
+    with pytest.raises(ValueError, match="sel"):
+        function(0.0, x, x)
+    # a lattice without dims has nothing to keep apart, and is simply summed
+    plain = LatticeFunction(honeycomb(polar_angle=0.4, w=2.0))
+    np.testing.assert_allclose(plain(0.0, x, x), plain.sel({})(0.0, x, x), atol=1e-12)
 
 
 def test_conflicting_drive_coordinate_raises():
@@ -220,11 +234,11 @@ def test_cupy_coordinates():
     lattice = honeycomb()
     function = LatticeFunction(lattice, shaken(lattice), **STARK)
     x, y = AnalyticPotential(BOX, RES).coords_1d()
-    params = {"nu": 1.0, "_dim_theta": 0.0, "_dim_waist": 1.5, "_dim_alpha": 1.0}
+    at = function.sel({"theta": 0.0, "waist": 1.5, "alpha": 1.0})
 
-    on_device = function(0.2, cp.asarray(x), cp.asarray(y), **params)
+    on_device = at(0.2, cp.asarray(x), cp.asarray(y), nu=1.0)
     assert isinstance(on_device, cp.ndarray)
-    np.testing.assert_allclose(cp.asnumpy(on_device), function(0.2, x, y, **params), atol=1e-12)
+    np.testing.assert_allclose(cp.asnumpy(on_device), at(0.2, x, y, nu=1.0), atol=1e-12)
 
 
 def test_ssfm_sweeps_beam_parameters():
@@ -245,3 +259,38 @@ def test_ssfm_sweeps_beam_parameters():
     assert float(abs(norm - 1).max()) < 1e-5
     # The polarization angle changes the potential, so the runs must differ
     assert float(abs(psi.isel(theta=0) - psi.isel(theta=1)).isel(t=-1).max()) > 1e-6
+
+
+def test_sample_on_follows_a_moving_grid():
+    """The whole chain: a swept lattice drawn over a field whose grid stretches with time.
+
+    The potential is evaluated frame by frame on the field's own, factored, moving coordinates, at
+    every point of the lattice's own sweep, exactly as the reduced function sums the beams there.
+    """
+    lattice = honeycomb()
+    analytic = AnalyticPotential(BOX, RES)
+    function = add_to_analytic(analytic, lattice, shaken(lattice), **STARK)
+
+    tv = np.linspace(0, 1, 3)
+    lam = xr.DataArray(1 + 0.5 * tv, dims="t", coords={"t": tv})
+    rho_x, rho_y = xr.broadcast(analytic.x, analytic.y)
+    field = (xr.ones_like(rho_x) * (1 + 0 * lam)).transpose("t", "a1", "a2")
+    field = field.drop_vars(["x", "y"], errors="ignore").assign_coords(
+        rho_x=rho_x.drop_vars(["x", "y"], errors="ignore"),
+        rho_y=rho_y.drop_vars(["x", "y"], errors="ignore"),
+        lambda_x=lam,
+        lambda_y=lam,
+    )
+    field = frames.set_cart_factors(field, {"x": ("rho_x", "lambda_x"), "y": ("rho_y", "lambda_y")})
+
+    V = analytic.sample_on(field)
+    assert set(V.dims) == {"t", "theta", "waist", "nu", "alpha", "a1", "a2"}
+    for t in (0.0, 1.0):
+        point = {"theta": 0.6, "waist": 3.0, "alpha": 2.0}
+        x = (field.rho_x * lam.sel(t=t)).transpose("a1", "a2").values
+        y = (field.rho_y * lam.sel(t=t)).transpose("a1", "a2").values
+        np.testing.assert_allclose(
+            V.sel(t=t, nu=2.5, **point).transpose("a1", "a2").values,
+            function.sel(point)(t, x, y, nu=2.5),
+            atol=1e-12,
+        )

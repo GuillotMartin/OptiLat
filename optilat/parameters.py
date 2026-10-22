@@ -8,10 +8,10 @@ lattice to a single point of the parameter space at a time. The helpers below ar
 they collect the parameter dimensions of an object, select a point, and turn the selected values
 into plain numbers.
 
-The numpy routes register every parameter dimension 'd' with the BECs potential under the reserved
-key '_dim_<d>', with the coordinate of 'd' as its value. The potential then hands the generated
-function the *label* of the point it runs, and the function selects the lattice there itself. This
-works whatever the arrays are made of: a derived, unnamed or multi-dimensional input such as
+The numpy routes hand the BECs potentials a function that carries the lattice's parameter
+dimensions itself, in 'param_coords', and reduces itself to a point of them with 'sel'. The potential
+hands it the *label* of the point a run sits at, and the function selects the lattice there itself.
+This works whatever the arrays are made of: a derived, unnamed or multi-dimensional input such as
 [cos(theta), sin(theta) exp(i phi)] is reduced exactly like a bare parameter.
 """
 
@@ -22,9 +22,6 @@ import xarray as xr
 
 # The dimensions that describe the inputs themselves rather than a parameter space
 INTERNAL_DIMS = ("component", "Jones")
-
-# The prefix of the keyword under which a parameter dimension is handed to a generated function
-DIM_PREFIX = "_dim_"
 
 
 def _same_coord(a: xr.DataArray, b: xr.DataArray) -> bool:
@@ -132,44 +129,6 @@ def scalarize(obj):
         if isinstance(value, xr.DataArray):
             setattr(new, attr, value.item() if value.ndim == 0 else value.values)
     return new
-
-
-def is_labelled(t, params: dict) -> bool:
-    """Whether a generated function is called over whole dimensions rather than at a single point.
-
-    That is the case when the time or any parameter is a DataArray, as in the to_potential and plot_t
-    methods of the BECs potentials. The solvers hand over plain values only.
-    """
-    return isinstance(t, xr.DataArray) or any(
-        isinstance(value, xr.DataArray) for value in params.values()
-    )
-
-
-def dim_parameters(dims: dict[str, xr.DataArray]) -> dict[str, xr.DataArray]:
-    """The parameters to register with a BECs potential for some parameter dimensions."""
-    return {DIM_PREFIX + dim: coord for dim, coord in dims.items()}
-
-
-def dim_selection(params: dict, dims) -> dict:
-    """The point of the parameter space selected by the '_dim_<d>' entries of a parameter dictionary.
-
-    Only the entries given as single values are kept, so that a labelled call, which hands over whole
-    coordinates, selects nothing.
-
-    Args:
-        params (dict): The parameters a generated function was called with.
-        dims: The parameter dimensions to look for.
-
-    Returns:
-        dict: The selected label of each dimension found.
-    """
-    selection = {}
-    for dim in dims:
-        value = params.get(DIM_PREFIX + dim)
-        if value is None or (isinstance(value, xr.DataArray) and value.ndim):
-            continue
-        selection[dim] = to_number(value)
-    return selection
 
 
 def array_module(*arrays):

@@ -6,14 +6,14 @@ Three routes are provided, all built on the expansion of the dynamics module:
   time function. The terms compose with the rest of the potential and can be inspected one by one.
 - 'add_to_potentialT' with mode="stacked": the gratings are kept stacked in one array and combined by a
   single function. Around five times faster per time step.
-- 'add_to_analytic': a single function of time and coordinates, for the AnalyticPotential class and the
-  rescaling solver, whose grid changes at every step. No grating is stored.
+- 'add_to_analytic': a single function of time and coordinates, for the AnalyticPotential class, which
+  can be evaluated on a grid that changes at every step. No grating is stored.
 
 Every route keeps every parameter dimension of the lattice: those of the drive, of the beams (a
 polarization angle, a wavelength, a waist, ...) and of the polarizabilities. The shapes route simply
-stores them in the shapes. The two other routes register each of them with the potential under the key
-'_dim_<name>' (see the parameters module), so that the solvers hand them the label of the point they
-run, and reduce the lattice to that point themselves, once per run.
+stores them in the shapes. The two other routes register a function that carries them itself: it lists
+them in 'param_coords' and reduces itself to a point of them with 'sel', which the BECs potentials call
+once per run with the label of the point a solver runs (see ParametricPotential.add_function there).
 
 Nothing here imports the BECs package: the adapters only use the public methods of the potential
 object they are given.
@@ -27,12 +27,8 @@ import xarray as xr
 
 from optilat.dynamics import Expansion, LatticeDrive, expand
 from optilat.parameters import (
-    DIM_PREFIX,
     array_module,
     collect_dims,
-    dim_parameters,
-    dim_selection,
-    is_labelled,
     merge_dims,
     scalarize,
     select,
@@ -69,16 +65,10 @@ def _check_free(name: str, taken, kind: str):
 
 
 def _check_drive(lattice, drive: LatticeDrive):
-    """Raise if a drive does not describe the beams of a lattice, or uses a reserved name."""
+    """Raise if a drive does not describe the beams of a lattice."""
     if len(drive) != len(lattice.beams):
         raise ValueError(
             f"The drive describes {len(drive)} beams but the lattice has {len(lattice.beams)}."
-        )
-    reserved = [name for name in drive.parameters if name.startswith(DIM_PREFIX)]
-    if reserved:
-        raise ValueError(
-            f"The drive parameter name(s) {reserved} start with the reserved prefix "
-            f"'{DIM_PREFIX}'. Rename them."
         )
 
 
@@ -154,19 +144,21 @@ class LatticeFunction:
     """The Stark potential of a driven optical lattice, as a function f(t, *coords, **parameters).
 
     That is the signature of the functions of an AnalyticPotential: the time, one coordinate per
-    spatial dimension in the order x, y, z (the missing axes sit at 0), and the parameters as
-    keywords. Register it with the parameters it needs, 'self.parameters', or use 'add_to_analytic'
-    which does exactly that.
+    spatial dimension in the order x, y, z (the missing axes sit at 0), and the drive parameters as
+    keywords. The parameter dimensions of the beams and of the polarizabilities are the function's
+    own: it lists them in 'param_coords' and reduces itself to a point of them with 'sel', which is
+    what an AnalyticPotential looks for in order to sweep them. Register it with the drive
+    parameters, 'self.parameters', or use 'add_to_analytic' which does exactly that.
 
-    The function is evaluated in one of two ways, chosen at every call:
+    The function is evaluated in one of two ways:
 
-    - with a plain time and plain parameters, as the solvers call it, the lattice is reduced to the
-      selected point of its parameter space and the beams are summed in the array module of the
-      coordinates, numpy or cupy. The reduced lattice is cached, so only the first call of a run
-      pays for the selection.
-    - with a DataArray time or parameters, as AnalyticPotential.to_potential and plot_t call it,
-      the result keeps every dimension. It is then built from the static gratings of 'expand', as
-      in the PotentialT route, which costs far less memory than summing the complex fields.
+    - reduced, 'self.sel(selection)(t, *coords, **parameters)', as the solvers call it: the lattice
+      is reduced to the selected point of its parameter space once, and every call sums the beams in
+      the array module of the coordinates, numpy or cupy.
+    - unreduced, 'self(t, *coords, **parameters)', as AnalyticPotential.to_potential and plot_t
+      call it, with DataArray times or coordinates: the result keeps every dimension. It is then
+      built from the static gratings of 'expand', as in the PotentialT route, which costs far less
+      memory than summing the complex fields.
     """
 
     def __init__(
@@ -204,17 +196,19 @@ class LatticeFunction:
         self.rtol = rtol
 
         # The dimensions this function selects itself, on the beams and the polarizabilities
-        self.dims = merge_dims(lattice.param_coords, collect_dims(*self.stark.values()))
+        self.param_coords = merge_dims(lattice.param_coords, collect_dims(*self.stark.values()))
         # A dimension shared with the drive must have the same coordinate there, or the potential
         # would silently keep only one of the two
         for value in self.drive.parameters.values():
             if isinstance(value, xr.DataArray):
-                shared = [dim for dim in value.dims if dim in self.dims and dim in value.coords]
-                merge_dims(self.dims, collect_dims(*(value.coords[dim] for dim in shared)))
+                shared = [
+                    dim for dim in value.dims if dim in self.param_coords and dim in value.coords
+                ]
+                merge_dims(self.param_coords, collect_dims(*(value.coords[dim] for dim in shared)))
 
-        # Everything the potential has to hand over: the drive parameters, under their own names,
-        # and the label of every parameter dimension, under '_dim_<name>'
-        self.parameters = {**self.drive.parameters, **dim_parameters(self.dims)}
+        # What the potential has to hand over as keywords: the drive parameters. The dimensions of
+        # the beams and polarizabilities reach the function through 'sel' instead.
+        self.parameters = dict(self.drive.parameters)
 
         self._numeric_cache: dict[tuple, _NumericLattice] = {}
         self._coords_cache: tuple | None = None
@@ -222,44 +216,84 @@ class LatticeFunction:
     def __repr__(self) -> str:
         return (
             f"LatticeFunction over {len(self.lattice.beams)} beams, parameter dimensions "
-            f"{list(self.dims)}, drive parameters {list(self.drive.parameters)}"
+            f"{list(self.param_coords)}, drive parameters {list(self.drive.parameters)}"
         )
 
+    def sel(self, selection: dict) -> Callable:
+        """The function at one point of its parameter space, as the solvers evaluate it.
+
+        The lattice is reduced to that point here, once, and the function returned only sums the
+        beams. The reduced lattice is also cached by point, so reducing to a point seen before
+        costs nothing.
+
+        Args:
+            selection (dict): The label of each parameter dimension in 'param_coords'. Entries for
+            other dimensions are ignored.
+
+        Raises:
+            ValueError: If the label of a parameter dimension is missing.
+
+        Returns:
+            Callable: f(t, *coords, **parameters), with the drive parameters as keywords. Its
+            coordinates are plain numpy or cupy arrays broadcastable against each other, in the
+            order x, y, z, or DataArrays; it returns an array of the coordinates' module, or a
+            DataArray over their dimensions for labelled ones.
+        """
+        lat = self._numeric(selection)
+
+        def at(t, *coords, **params):
+            return self._fast(lat, t, coords, params)
+
+        return at
+
     def __call__(self, t, *coords, **params):
-        """The Stark potential of the driven lattice at time t, over the coordinates given.
+        """The Stark potential of the driven lattice over whole dimensions, keeping every
+        parameter dimension of the lattice.
+
+        Plain arrays carry no dimension names to keep the result's dimensions apart by, so plain
+        coordinates are only accepted for a lattice without parameter dimensions, which is then
+        summed exactly as 'sel({})' would. Any other is reduced with 'sel' first.
 
         Args:
             t (Union[float,xr.DataArray]): The time, or a whole time coordinate.
-            *coords: One coordinate per spatial dimension, in the order x, y, z. Plain numpy or cupy
-            arrays, broadcastable against each other, or DataArrays.
-            **params: The drive parameters, and the label of every parameter dimension under
-            '_dim_<name>', as listed in 'self.parameters'.
+            *coords: One coordinate per spatial dimension, in the order x, y, z: DataArrays, such as
+            a potential's own 'coords', or single values.
+            **params: The drive parameters, as listed in 'self.parameters'.
+
+        Raises:
+            ValueError: For plain coordinate arrays, if the lattice has parameter dimensions.
 
         Returns:
-            The potential: an array of the coordinates' module for plain coordinates, a DataArray
-            over their dimensions for labelled ones.
+            xr.DataArray: The potential over the dimensions of its inputs and of the lattice.
         """
-        if is_labelled(t, params):
-            return self._labelled(t, coords, params)
-        return self._fast(t, coords, params)
+        if any(not isinstance(c, xr.DataArray) and np.ndim(c) > 0 for c in coords):
+            if self.param_coords:
+                raise ValueError(
+                    "Plain coordinate arrays carry no dimension names, so the parameter "
+                    f"dimension(s) {list(self.param_coords)} of the lattice cannot be kept apart "
+                    "from them. Reduce the function to a point with 'sel' first, or pass "
+                    "DataArray coordinates."
+                )
+            return self.sel({})(t, *coords, **params)
+        return self._labelled(t, coords, params)
 
     def _drive_params(self, params: dict) -> dict:
         """The entries of a parameter dictionary that belong to the drive."""
         return {name: params[name] for name in self.drive.parameters if name in params}
 
-    def _numeric(self, params: dict) -> _NumericLattice:
-        """The lattice at the point of its parameter space selected by 'params', in plain numbers.
+    def _numeric(self, selection: dict) -> _NumericLattice:
+        """The lattice at the point of its parameter space selected by 'selection', in plain numbers.
 
         Raises:
-            ValueError: If the label of a parameter dimension is missing from 'params'.
+            ValueError: If the label of a parameter dimension is missing from 'selection'.
         """
-        selection = dim_selection(params, self.dims)
-        missing = [dim for dim in self.dims if dim not in selection]
+        missing = [dim for dim in self.param_coords if dim not in selection]
         if missing:
             raise ValueError(
-                f"No value was given for the parameter dimension(s) {missing}. Pass them as "
-                f"'{DIM_PREFIX}<name>' keywords, or register 'self.parameters' with the potential."
+                f"No value was given for the parameter dimension(s) {missing}. Pass them to 'sel', "
+                "or register the function with a potential, which does."
             )
+        selection = {dim: to_number(selection[dim]) for dim in self.param_coords}
 
         key = tuple(selection.values())
         if key not in self._numeric_cache:
@@ -306,9 +340,8 @@ class LatticeFunction:
         self._coords_cache = (coords, arrays, labelled[0].dims)
         return arrays, labelled[0].dims
 
-    def _fast(self, t, coords: tuple, params: dict):
-        """Sum the beams at a single point of the parameter space, as the solvers need it."""
-        lat = self._numeric(params)
+    def _fast(self, lat: _NumericLattice, t, coords: tuple, params: dict):
+        """Sum the beams of a lattice reduced to a single point, as the solvers need it."""
         drive_params = self._drive_params(params)
         arrays, labels = self._plain_coords(coords)
         xp = array_module(*arrays)
@@ -347,24 +380,9 @@ class LatticeFunction:
         return xr.DataArray(V, dims=labels)
 
     def _labelled(self, t, coords: tuple, params: dict) -> xr.DataArray:
-        """Evaluate the potential over whole dimensions, through the static gratings.
-
-        Raises:
-            ValueError: If a coordinate is a bare array, whose dimensions cannot be told apart.
-        """
-        if any(not isinstance(c, xr.DataArray) and np.ndim(c) > 0 for c in coords):
-            raise ValueError(
-                "A labelled evaluation (DataArray time or parameters) needs DataArray coordinates, "
-                "such as the potential's own 'coords', or single values."
-            )
-
-        # A parameter dimension handed over as a single value still selects the lattice
-        selection = dim_selection(params, self.dims)
-        lattice = self.lattice.sel(selection) if selection else self.lattice
-        stark = {name: select(value, selection) for name, value in self.stark.items()}
-
+        """Evaluate the potential over whole dimensions, through the static gratings."""
         expansion = expand(
-            lattice, self.drive, **axes_from_coords(coords), **stark, rtol=self.rtol
+            self.lattice, self.drive, **axes_from_coords(coords), **self.stark, rtol=self.rtol
         )
         drive_params = self._drive_params(params)
         V = 0
@@ -388,10 +406,10 @@ def add_to_analytic(
     """Add a driven optical lattice to an AnalyticPotential object, as a function of time and space.
 
     Contrarily to the PotentialT route, nothing is precomputed on a grid: the beam superposition is
-    evaluated on whichever coordinates the solver hands over, which is what the rescaling solver
-    needs, since its grid changes at every time step. The parameter dimensions of the beams, of the
-    polarizabilities and of the drive all become parameter dimensions of the potential, swept by the
-    solvers, and 'to_potential' and 'plot_t' keep them as dimensions of the result.
+    evaluated on whichever coordinates it is handed, which is what a solver whose grid changes at
+    every time step needs. The parameter dimensions of the beams, of the polarizabilities and of the
+    drive all become parameter dimensions of the potential, swept by the solvers, and
+    'to_potential' and 'plot_t' keep them as dimensions of the result.
 
     Args:
         anpot: An AnalyticPotential-like object, used through its add_function and add_term methods.
@@ -429,62 +447,75 @@ def add_to_analytic(
 ### ====================
 
 
-def _stacked_sum(
-    expansion: Expansion, zero: xr.DataArray, spatial: tuple[str, ...], pair: str
-) -> tuple[Callable, dict[str, xr.DataArray]]:
+class _StackedSum:
     """A single function of time summing every grating of an expansion with its coefficient.
 
     The gratings are stacked along a 'pair' dimension, keeping whatever parameter dimensions they
-    carry. A solver run selects its point of that stack once, and every time step is then a single
-    tensor contraction.
-
-    Args:
-        expansion (Expansion): The expansion to sum.
-        zero (xr.DataArray): Zeros over the spatial grid, which every grating is broadcast onto.
-        spatial (tuple[str, ...]): The spatial dimensions of the potential.
-        pair (str): The name of the stacking dimension.
-
-    Returns:
-        tuple[Callable, dict[str, xr.DataArray]]: The function f(t, **parameters), returning the
-        potential over the grid, and the parameters to register it with.
+    carry. Those are the function's own, listed in 'param_coords' and reduced with 'sel': a solver
+    run selects its point of the stack once, and every time step is then a single tensor
+    contraction.
     """
-    stack = xr.concat(
-        [grating.shape + zero for grating in expansion.gratings], dim=pair, coords="minimal"
-    )
-    dims = collect_dims(stack, skip=(pair, *spatial))
-    stack = stack.transpose(pair, *spatial, *dims)
-    grid_coords = dict(zero.coords)
-    coeffs = [grating.coeff for grating in expansion.gratings]
-    drive_names = set(expansion.parameters)
-    cache: dict[tuple, np.ndarray] = {}
 
-    def lattice_sum(t, **params):
-        """The sum of every grating times its coefficient at time t."""
-        drive_params = {name: value for name, value in params.items() if name in drive_names}
-        values = [coeff(t, **drive_params) for coeff in coeffs]
-        selection = dim_selection(params, dims)
+    def __init__(
+        self, expansion: Expansion, zero: xr.DataArray, spatial: tuple[str, ...], pair: str
+    ):
+        """
+        Args:
+            expansion (Expansion): The expansion to sum.
+            zero (xr.DataArray): Zeros over the spatial grid, which every grating is broadcast onto.
+            spatial (tuple[str, ...]): The spatial dimensions of the potential.
+            pair (str): The name of the stacking dimension.
+        """
+        stack = xr.concat(
+            [grating.shape + zero for grating in expansion.gratings], dim=pair, coords="minimal"
+        )
+        self.param_coords = collect_dims(stack, skip=(pair, *spatial))
+        self.stack = stack.transpose(pair, *spatial, *self.param_coords)
+        self.spatial = spatial
+        self.pair = pair
+        self.grid_coords = dict(zero.coords)
+        self.coeffs = [grating.coeff for grating in expansion.gratings]
+        self.drive_names = set(expansion.parameters)
 
-        if is_labelled(t, params):
-            # to_potential and plot_t hand over whole coordinates, and the coefficients then carry
-            # dimensions of their own that have to stay labelled
-            c = xr.concat([xr.DataArray(value) for value in values], dim=pair, coords="minimal")
-            return xr.dot(select(stack, selection), c, dim=pair)
+    def _coefficients(self, t, params: dict) -> list:
+        """The coefficient of every grating at time t."""
+        drive_params = {name: value for name, value in params.items() if name in self.drive_names}
+        return [coeff(t, **drive_params) for coeff in self.coeffs]
 
-        key = tuple(selection.values())
-        if key not in cache:
-            if len(selection) != len(dims):
-                missing = [dim for dim in dims if dim not in selection]
-                raise ValueError(f"No value was given for the parameter dimension(s) {missing}.")
-            cache[key] = np.ascontiguousarray(
-                select(stack, selection).transpose(pair, *spatial).values
-            )
-        return xr.DataArray(
-            np.tensordot(np.asarray(values, dtype=float), cache[key], axes=(0, 0)),
-            dims=spatial,
-            coords=grid_coords,
+    def sel(self, selection: dict) -> Callable:
+        """The sum at one point of its parameter space, as the solvers evaluate it.
+
+        Raises:
+            ValueError: If the label of a parameter dimension is missing.
+        """
+        missing = [dim for dim in self.param_coords if dim not in selection]
+        if missing:
+            raise ValueError(f"No value was given for the parameter dimension(s) {missing}.")
+        point = {dim: selection[dim] for dim in self.param_coords}
+        stack = np.ascontiguousarray(
+            select(self.stack, point).transpose(self.pair, *self.spatial).values
         )
 
-    return lattice_sum, {**expansion.parameters, **dim_parameters(dims)}
+        def lattice_sum(t, **params):
+            """The sum of every grating times its coefficient at time t."""
+            values = np.asarray(self._coefficients(t, params), dtype=float)
+            return xr.DataArray(
+                np.tensordot(values, stack, axes=(0, 0)),
+                dims=self.spatial,
+                coords=self.grid_coords,
+            )
+
+        return lattice_sum
+
+    def __call__(self, t, **params):
+        """The sum over whole dimensions, as to_potential and plot_t call it: the coefficients then
+        carry dimensions of their own that have to stay labelled."""
+        c = xr.concat(
+            [xr.DataArray(value) for value in self._coefficients(t, params)],
+            dim=self.pair,
+            coords="minimal",
+        )
+        return xr.dot(self.stack, c, dim=self.pair)
 
 
 def add_to_potentialT(
@@ -564,10 +595,8 @@ def add_to_potentialT(
         fname = f"{name}_sum"
         _check_free(fname, potT.funcs, "time function")
 
-        function, parameters = _stacked_sum(
-            expansion, zero, tuple(potT.spatial_dims), f"_{name}_pair"
-        )
-        potT.add_function(fname, function, parameters=parameters)
+        function = _StackedSum(expansion, zero, tuple(potT.spatial_dims), f"_{name}_pair")
+        potT.add_function(fname, function, parameters=expansion.parameters)
         terms = [fname]
 
     potT.add_term(" + ".join(terms), name=name)
